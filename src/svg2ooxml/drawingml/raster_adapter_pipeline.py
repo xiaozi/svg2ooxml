@@ -310,7 +310,6 @@ class RasterAdapterPipelineMixin:
             return None
 
 
-
 __all__ = ["RasterAdapterPipelineMixin"]
 
 
@@ -342,14 +341,16 @@ def _descriptor_payload_from_resolved_filter(
     bounds: tuple[float, float, float, float] | None = None,
 ) -> dict[str, Any]:
     primitives = list(getattr(resolved_filter, "primitives", ()) or ())
+    filter_units = getattr(resolved_filter, "filter_units", None)
     if bounds is None:
         region = dict(getattr(resolved_filter, "region", None) or {})
     else:
         x0, y0, x1, y1 = bounds
         region = {"x": x0, "y": y0, "width": x1 - x0, "height": y1 - y0}
+        filter_units = "userSpaceOnUse"
     return {
         "filter_id": getattr(resolved_filter, "filter_id", None),
-        "filter_units": getattr(resolved_filter, "filter_units", None),
+        "filter_units": filter_units,
         "primitive_units": getattr(resolved_filter, "primitive_units", None),
         "primitive_count": len(primitives),
         "primitive_tags": [getattr(primitive, "tag", "") for primitive in primitives],

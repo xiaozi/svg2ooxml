@@ -105,7 +105,11 @@ def descriptor_to_skia_path(descriptor: dict[str, Any]):
             control1 = segment.get("control1")
             control2 = segment.get("control2")
             end = segment.get("end")
-            if _is_point_pair(control1) and _is_point_pair(control2) and _is_point_pair(end):
+            if (
+                _is_point_pair(control1)
+                and _is_point_pair(control2)
+                and _is_point_pair(end)
+            ):
                 path.cubicTo(
                     float(control1[0]),
                     float(control1[1]),
@@ -200,7 +204,9 @@ def render_surface_from_descriptor(
     if not isinstance(source_bounds, dict):
         return None
 
-    parsed_bounds = _coerce_bounds(source_bounds, default_width=width_px, default_height=height_px)
+    parsed_bounds = _coerce_bounds(
+        source_bounds, default_width=width_px, default_height=height_px
+    )
     if parsed_bounds is None:
         return None
     x, y, width, height = parsed_bounds
@@ -213,7 +219,15 @@ def render_surface_from_descriptor(
     canvas.scale(width_px / width, height_px / height)
     canvas.translate(-x, -y)
 
-    if not _draw_descriptor_on_canvas(canvas, descriptor):
+    if descriptor.get("paint_surface"):
+        if not _draw_paint_surface_on_canvas(
+            canvas,
+            descriptor,
+            bounds=(x, y, width, height),
+        ):
+            canvas.restore()
+            return None
+    elif not _draw_descriptor_on_canvas(canvas, descriptor):
         canvas.restore()
         return None
 
@@ -223,6 +237,24 @@ def render_surface_from_descriptor(
         return _surface_from_skia_image(image)
     except Exception:  # pragma: no cover - defensive
         return None
+
+
+def _draw_paint_surface_on_canvas(
+    canvas,
+    descriptor: dict[str, Any],
+    *,
+    bounds: tuple[float, float, float, float],
+) -> bool:
+    x, y, width, height = bounds
+    paint = _fill_paint_from_descriptor(
+        descriptor.get("fill"),
+        _float_or(descriptor.get("opacity"), 1.0),
+        bounds,
+    )
+    if paint is _UNSUPPORTED_SOURCE_STYLE or paint is None:
+        return False
+    canvas.drawRect(skia.Rect.MakeXYWH(x, y, width, height), paint)
+    return True
 
 
 # ------------------------------------------------------------------ #
@@ -394,7 +426,9 @@ def render_caption(
     text_color = skia.Paint(Color=skia.ColorSetARGB(235, 255, 255, 255), AntiAlias=True)
     caption = filter_name.upper()
     sub_caption = ", ".join(primitives) if primitives else "resvg filter"
-    canvas.drawString(caption, 10, height - overlay_height + font_size * 0.1, font, text_color)
+    canvas.drawString(
+        caption, 10, height - overlay_height + font_size * 0.1, font, text_color
+    )
     sub_font = skia.Font(typeface, max(10, font_size * 0.7))
     canvas.drawString(
         f"{sub_caption} · passes:{passes}",
