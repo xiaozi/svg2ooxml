@@ -9,8 +9,12 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
+import threading
+import urllib.parse
 import zipfile
 from collections.abc import Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,6 +23,8 @@ from lxml import etree as ET
 from PIL import Image
 
 logger = logging.getLogger(__name__)
+_SOFFICE_PROCESS_LOCK = threading.Lock()
+_SOFFICE_AVAILABLE = object()
 
 
 class VisualRendererError(RuntimeError):
@@ -41,6 +47,207 @@ def _normalize_user_installation(user_installation: str | None) -> str | None:
     return Path(user_installation).resolve().as_uri()
 
 
+def _path_from_file_uri(uri: str | None) -> Path | None:
+    if not uri or not uri.startswith("file:"):
+        return None
+    parsed = urllib.parse.urlparse(uri)
+    if parsed.scheme != "file" or parsed.netloc not in {"", "localhost"}:
+        return None
+    return Path(urllib.parse.unquote(parsed.path))
+
+
+def _check_file_readable(path: Path, label: str) -> str | None:
+    if not path.exists():
+        return f"{label} does not exist: {path}"
+    if not path.is_file():
+        return f"{label} is not a file: {path}"
+    try:
+        with path.open("rb") as handle:
+            handle.read(1)
+    except OSError as exc:
+        return f"{label} is not readable: {path} ({exc})"
+    return None
+
+
+def _check_executable(path: Path, label: str) -> str | None:
+    if not path.exists():
+        return f"{label} does not exist: {path}"
+    if not path.is_file():
+        return f"{label} is not a file: {path}"
+    if not os.access(path, os.X_OK):
+        return f"{label} is not executable: {path}"
+    return None
+
+
+def _resolve_command_path(command: str) -> Path:
+    path = Path(command)
+    if path.parent != Path("."):
+        return path
+    resolved = shutil.which(command)
+    if resolved:
+        return Path(resolved)
+    return path
+
+
+def _check_directory_writable(path: Path, label: str) -> str | None:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return f"{label} cannot be created: {path} ({exc})"
+    if not path.is_dir():
+        return f"{label} is not a directory: {path}"
+    try:
+        with tempfile.NamedTemporaryFile(
+            prefix=".svg2ooxml-write-test-",
+            dir=path,
+            delete=True,
+        ) as handle:
+            handle.write(b"ok")
+            handle.flush()
+    except OSError as exc:
+        return f"{label} is not writable: {path} ({exc})"
+    return None
+
+
+def _macos_app_bundle_path(command_path: Path) -> Path | None:
+    for parent in command_path.parents:
+        if parent.suffix == ".app":
+            return parent
+    return None
+
+
+def _macos_quarantine_value(path: Path) -> str | None:
+    try:
+        completed = subprocess.run(
+            ["xattr", "-p", "com.apple.quarantine", str(path)],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=5,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode != 0:
+        return None
+    return completed.stdout.strip() or None
+
+
+def _macos_quarantine_hints(paths: Sequence[Path]) -> list[str]:
+    if platform.system() != "Darwin":
+        return []
+
+    hints: list[str] = []
+    seen: set[Path] = set()
+    for path in paths:
+        resolved = path.resolve()
+        if resolved in seen or not resolved.exists():
+            continue
+        seen.add(resolved)
+        quarantine = _macos_quarantine_value(resolved)
+        if quarantine:
+            hints.append(
+                f"macOS quarantine is set on {resolved}; inspect with "
+                f"`xattr -l {resolved}` and clear only if trusted."
+            )
+    return hints
+
+
+def _latest_macos_soffice_crash_hint() -> str | None:
+    if platform.system() != "Darwin":
+        return None
+    reports = sorted(
+        Path.home().glob("Library/Logs/DiagnosticReports/soffice*.ips"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    for report in reports[:6]:
+        try:
+            text = report.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if (
+            "sandbox denied the right to lookup com.apple.coreservices.launchservicesd"
+            in text
+            or "_RegisterApplication(), unable to get application ASN from launchservicesd"
+            in text
+        ):
+            return (
+                "Recent macOS crash report shows LibreOffice was sandbox-denied "
+                "from looking up com.apple.coreservices.launchservicesd while "
+                "registering with LaunchServices."
+            )
+    return None
+
+
+def _probe_soffice_conversion(
+    command_path: str,
+    *,
+    timeout: float | None,
+    user_installation: str | None = None,
+) -> str | None:
+    """Return None when a tiny conversion works; otherwise return the reason."""
+
+    if os.getenv("SVG2OOXML_SKIP_SOFFICE_PROBE") == "1":
+        return None
+
+    probe_root = Path(tempfile.mkdtemp(prefix="svg2ooxml_soffice_probe_"))
+    try:
+        input_dir = probe_root / "input"
+        output_dir = probe_root / "output"
+        profile_dir = probe_root / "profile"
+        input_dir.mkdir()
+        output_dir.mkdir()
+        profile_dir.mkdir()
+        input_path = input_dir / "probe.txt"
+        input_path.write_text("LibreOffice conversion probe\n", encoding="utf-8")
+        profile_uri = user_installation or profile_dir.resolve().as_uri()
+        cmd = [
+            command_path,
+            "--headless",
+            "--nologo",
+            "--nodefault",
+            "--nofirststartwizard",
+            "--norestore",
+            "--nolockcheck",
+            f"-env:UserInstallation={profile_uri}",
+            "--convert-to",
+            "pdf",
+            "--outdir",
+            str(output_dir),
+            str(input_path),
+        ]
+        try:
+            completed = subprocess.run(
+                cmd,
+                capture_output=True,
+                check=False,
+                text=True,
+                timeout=timeout,
+            )
+        except FileNotFoundError:
+            return "LibreOffice soffice command not found."
+        except subprocess.TimeoutExpired:
+            return f"LibreOffice conversion probe timed out after {timeout} seconds."
+
+        if completed.returncode == 0 and (output_dir / "probe.pdf").exists():
+            return None
+
+        message_lines = [
+            "LibreOffice conversion probe failed.",
+            f"exit code: {completed.returncode}",
+        ]
+        if completed.stdout:
+            message_lines.append(f"stdout:\n{completed.stdout}")
+        if completed.stderr:
+            message_lines.append(f"stderr:\n{completed.stderr}")
+        crash_hint = _latest_macos_soffice_crash_hint()
+        if crash_hint:
+            message_lines.append(f"hint: {crash_hint}")
+        return "\n".join(message_lines)
+    finally:
+        shutil.rmtree(probe_root, ignore_errors=True)
+
+
 def _kill_running_soffice() -> None:
     """Kill any running LibreOffice/soffice processes so headless mode can start cleanly."""
     try:
@@ -59,6 +266,26 @@ def _kill_running_soffice() -> None:
         pass
 
 
+@contextmanager
+def _soffice_render_lock():
+    """Serialize LibreOffice conversions across threads and local processes."""
+
+    with _SOFFICE_PROCESS_LOCK:
+        lock_path = Path(tempfile.gettempdir()) / "svg2ooxml-soffice-render.lock"
+        with lock_path.open("a+") as lock_file:
+            if os.name == "posix":
+                import fcntl
+
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                if os.name == "posix":
+                    import fcntl
+
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
 class LibreOfficeRenderer:
     """Render PPTX files to PNG using LibreOffice (soffice) headless mode."""
 
@@ -73,6 +300,8 @@ class LibreOfficeRenderer:
         self._timeout = timeout
         self._command_path = soffice_path or shutil.which("soffice")
         self._user_installation = _normalize_user_installation(user_installation)
+        self._user_installation_path = _path_from_file_uri(self._user_installation)
+        self._availability_probe: object | str | None = _SOFFICE_AVAILABLE
         if png_dpi is not None and png_dpi <= 0:
             raise ValueError("png_dpi must be > 0 or None to disable normalization.")
         self._png_dpi = png_dpi
@@ -83,9 +312,28 @@ class LibreOfficeRenderer:
 
     @property
     def available(self) -> bool:
-        """Return True if a working soffice binary has been located."""
+        """Return True if soffice can be used for conversion on this platform."""
 
-        return self._command_path is not None
+        return self.unavailable_reason is None
+
+    @property
+    def unavailable_reason(self) -> str | None:
+        if self._command_path is None:
+            return "LibreOffice (soffice) is not installed or not on PATH."
+        if self._availability_probe is _SOFFICE_AVAILABLE:
+            command_path = _resolve_command_path(self._command_path)
+            executable_error = _check_executable(
+                command_path, "LibreOffice soffice command"
+            )
+            if executable_error:
+                self._availability_probe = executable_error
+            else:
+                self._availability_probe = _probe_soffice_conversion(
+                    str(command_path),
+                    timeout=min(self._timeout or 30.0, 30.0),
+                    user_installation=self._user_installation,
+                )
+        return self._availability_probe
 
     @property
     def command_path(self) -> str | None:
@@ -96,7 +344,7 @@ class LibreOfficeRenderer:
     # ------------------------------------------------------------------
 
     def base_args(self) -> list[str]:
-        args = [
+        return [
             "--headless",
             "--nologo",
             "--nodefault",
@@ -104,32 +352,58 @@ class LibreOfficeRenderer:
             "--norestore",
             "--nolockcheck",
         ]
-        if self._user_installation:
-            args.append(f"-env:UserInstallation={self._user_installation}")
-        return args
 
     def render(self, pptx_path: Path | str, output_dir: Path | str) -> RenderedSlideSet:
         """Render *pptx_path* into PNG images under *output_dir*."""
 
         if not self.available:
             raise VisualRendererError(
-                "LibreOffice (soffice) is not installed or not on PATH."
+                self.unavailable_reason
+                or "LibreOffice (soffice) is not available for rendering."
             )
 
-        _kill_running_soffice()
-
         pptx_path = Path(pptx_path)
-        if not pptx_path.exists():
-            raise VisualRendererError(f"PPTX path does not exist: {pptx_path}")
-
         output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Create a unique temporary directory for this render pass to avoid locking issues
-        import tempfile
+        temporary_user_install_dir: Path | None = None
+        if self._user_installation:
+            user_install_uri = self._user_installation
+            user_install_dir = self._user_installation_path
+        else:
+            temporary_user_install_dir = Path(tempfile.mkdtemp(prefix="soffice_user_"))
+            user_install_dir = temporary_user_install_dir
+            user_install_uri = temporary_user_install_dir.resolve().as_uri()
 
-        user_install_dir = Path(tempfile.mkdtemp(prefix="soffice_user_"))
-        user_install_uri = user_install_dir.resolve().as_uri()
+        command_path = _resolve_command_path(self._command_path or "soffice")
+        preflight_errors = [
+            error
+            for error in (
+                _check_executable(command_path, "LibreOffice soffice command"),
+                _check_file_readable(pptx_path, "PPTX input"),
+                _check_directory_writable(output_dir, "LibreOffice output directory"),
+                "LibreOffice profile directory is not a local file URI: "
+                f"{self._user_installation}"
+                if self._user_installation and user_install_dir is None
+                else None,
+                _check_directory_writable(user_install_dir, "LibreOffice profile directory")
+                if user_install_dir is not None
+                else None,
+            )
+            if error
+        ]
+        quarantine_paths = [command_path, pptx_path]
+        app_path = _macos_app_bundle_path(command_path)
+        if app_path is not None:
+            quarantine_paths.append(app_path)
+        preflight_errors.extend(_macos_quarantine_hints(quarantine_paths))
+        if preflight_errors:
+            if temporary_user_install_dir is not None:
+                shutil.rmtree(temporary_user_install_dir, ignore_errors=True)
+                temporary_user_install_dir = None
+            message = "LibreOffice preflight failed:\n" + "\n".join(
+                f"- {error}" for error in preflight_errors
+            )
+            raise VisualRendererError(message)
 
         soffice_args = [
             *self.base_args(),
@@ -162,13 +436,18 @@ class LibreOfficeRenderer:
 
         cmd = [self._command_path or "soffice", *soffice_args]  # guarded above
         try:
-            completed = _run(cmd)
-            tried_open = False
-            if completed.returncode != 0 and platform.system() == "Darwin":
-                open_cmd = self._macos_open_command(soffice_args)
-                if open_cmd:
-                    tried_open = True
-                    completed = _run(open_cmd)
+            with _soffice_render_lock():
+                completed = _run(cmd)
+                tried_open = False
+                if (
+                    completed.returncode != 0
+                    and platform.system() == "Darwin"
+                    and os.getenv("SVG2OOXML_SOFFICE_OPEN_FALLBACK") == "1"
+                ):
+                    open_cmd = self._macos_open_command(soffice_args)
+                    if open_cmd:
+                        tried_open = True
+                        completed = _run(open_cmd)
 
             if completed.returncode != 0:
                 message_lines = [
@@ -192,11 +471,8 @@ class LibreOfficeRenderer:
                         )
                 raise VisualRendererError("\n".join(message_lines))
         finally:
-            # Clean up the temporary user installation directory
-            try:
-                shutil.rmtree(user_install_dir)
-            except Exception:
-                pass
+            if temporary_user_install_dir is not None:
+                shutil.rmtree(temporary_user_install_dir, ignore_errors=True)
 
         generated = sorted(output_dir.glob("*.png"))
         if not generated:

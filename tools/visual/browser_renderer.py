@@ -175,12 +175,27 @@ class BrowserSvgRenderer:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         width, height = _extract_dimensions(svg_text)
-        inline_svg, temp_svg_path = _resolve_inline_svg_markup(
-            svg_text, source_path=source_path
-        )
-        html = _wrap_inline_svg(
-            inline_svg, width=width, height=height, background=self._background
-        )
+        svg_src, temp_svg_path = _resolve_svg_src(svg_text, source_path=source_path)
+        if source_path is not None:
+            html = _wrap_svg_embed(
+                svg_src,
+                width=width,
+                height=height,
+                background=self._background,
+            )
+            ready_expression = "document.querySelector('embed') !== null"
+        else:
+            html = _wrap_svg(
+                svg_src,
+                width=width,
+                height=height,
+                background=self._background,
+            )
+            ready_expression = (
+                "document.images.length > 0 && "
+                "document.images[0].complete && "
+                "document.images[0].naturalWidth > 0"
+            )
         html_path: Path | None = None
         captured: list[Path] = []
         timestamps = _frame_timestamps(duration, fps)
@@ -212,7 +227,7 @@ class BrowserSvgRenderer:
                     page.goto(html_path.as_uri(), wait_until="load")
                 else:
                     page.set_content(html, wait_until="load")
-                page.wait_for_function("document.querySelector('svg') !== null")
+                page.wait_for_function(ready_expression)
                 if start_delay > 0:
                     page.wait_for_timeout(int(start_delay * 1000))
 

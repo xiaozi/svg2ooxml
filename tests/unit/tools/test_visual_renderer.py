@@ -24,8 +24,11 @@ def test_libreoffice_renderer_darwin_failure_raises_visual_error(
     pptx_path = tmp_path / "sample.pptx"
     pptx_path.write_bytes(b"fake-pptx")
     output_dir = tmp_path / "render"
+    soffice_path = tmp_path / "soffice"
+    soffice_path.write_text("#!/bin/sh\n")
+    soffice_path.chmod(0o755)
 
-    renderer = LibreOfficeRenderer(soffice_path="/usr/bin/soffice", png_dpi=None)
+    renderer = LibreOfficeRenderer(soffice_path=str(soffice_path), png_dpi=None)
 
     def fake_run(*args, **kwargs):  # noqa: ARG001
         return subprocess.CompletedProcess(
@@ -33,10 +36,105 @@ def test_libreoffice_renderer_darwin_failure_raises_visual_error(
         )
 
     monkeypatch.setattr("tools.visual.renderer.platform.system", lambda: "Darwin")
+    monkeypatch.setattr("tools.visual.renderer.platform.mac_ver", lambda: ("25.0", ("", "", ""), ""))
     monkeypatch.setattr("tools.visual.renderer.subprocess.run", fake_run)
+    monkeypatch.setattr("tools.visual.renderer._probe_soffice_conversion", lambda *args, **kwargs: None)
 
     with pytest.raises(VisualRendererError, match="LibreOffice failed to render PPTX"):
         renderer.render(pptx_path, output_dir)
+
+
+def test_libreoffice_renderer_is_unavailable_when_conversion_probe_fails(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    soffice_path = tmp_path / "soffice"
+    soffice_path.write_text("#!/bin/sh\n")
+    soffice_path.chmod(0o755)
+
+    monkeypatch.setattr(
+        "tools.visual.renderer._probe_soffice_conversion",
+        lambda *args, **kwargs: "probe failed: LaunchServices denied",
+    )
+
+    renderer = LibreOfficeRenderer(soffice_path=str(soffice_path), png_dpi=None)
+
+    assert renderer.available is False
+    assert renderer.unavailable_reason == "probe failed: LaunchServices denied"
+
+
+def test_libreoffice_renderer_is_available_when_conversion_probe_passes(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    soffice_path = tmp_path / "soffice"
+    soffice_path.write_text("#!/bin/sh\n")
+    soffice_path.chmod(0o755)
+
+    monkeypatch.setattr(
+        "tools.visual.renderer._probe_soffice_conversion",
+        lambda *args, **kwargs: None,
+    )
+
+    renderer = LibreOfficeRenderer(soffice_path=str(soffice_path), png_dpi=None)
+
+    assert renderer.available is True
+
+
+def test_libreoffice_renderer_honors_configured_user_installation(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pptx_path = tmp_path / "sample.pptx"
+    pptx_path.write_bytes(b"fake-pptx")
+    output_dir = tmp_path / "render"
+    profile_dir = tmp_path / "lo-profile"
+    soffice_path = tmp_path / "soffice"
+    soffice_path.write_text("#!/bin/sh\n")
+    soffice_path.chmod(0o755)
+    captured: dict[str, list[str]] = {}
+    removed: list[Path] = []
+
+    renderer = LibreOfficeRenderer(
+        soffice_path=str(soffice_path),
+        user_installation=str(profile_dir),
+        png_dpi=None,
+    )
+
+    def fake_run(cmd, **kwargs):  # noqa: ARG001
+        if cmd[:3] == ["xattr", "-p", "com.apple.quarantine"]:
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=1,
+                stdout="",
+                stderr="",
+            )
+        captured["cmd"] = cmd
+        outdir = Path(cmd[cmd.index("--outdir") + 1])
+        outdir.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (1, 1), "white").save(outdir / "sample.png")
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=0,
+            stdout="",
+            stderr="",
+        )
+
+    def fake_rmtree(path, **kwargs):  # noqa: ARG001
+        removed.append(Path(path))
+
+    monkeypatch.setattr("tools.visual.renderer.subprocess.run", fake_run)
+    monkeypatch.setattr("tools.visual.renderer.shutil.rmtree", fake_rmtree)
+    monkeypatch.setattr("tools.visual.renderer._probe_soffice_conversion", lambda *args, **kwargs: None)
+
+    result = renderer.render(pptx_path, output_dir)
+
+    profile_args = [
+        arg for arg in captured["cmd"] if arg.startswith("-env:UserInstallation=")
+    ]
+    assert profile_args == [f"-env:UserInstallation={profile_dir.resolve().as_uri()}"]
+    assert result.images == (output_dir / "sample.png",)
+    assert removed == []
 
 
 def test_resolve_renderer_supports_powerpoint() -> None:
