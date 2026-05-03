@@ -42,7 +42,7 @@ class MockConverter(ShapeConversionMixin):
     def _bitmap_fallback_limits(self, options):
         return (None, None)
 
-    def _resolve_clip_ref(self, element):
+    def _resolve_clip_ref(self, element, *, use_transform=None):
         return None
 
     def _resolve_mask_ref(self, element):

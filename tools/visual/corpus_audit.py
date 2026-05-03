@@ -34,6 +34,21 @@ from tools.visual.corpus_sources import (
 from tools.visual.diff import ImageDiffError, VisualDiffer
 from tools.visual.renderer import VisualRendererError, resolve_renderer
 from tools.visual.structure_compare import compare_substructures
+from tools.visual.corpus_audit_animation import (
+    _apply_animation_trace_metrics,
+    _run_animation_audit,
+    _svg_has_animation,
+)
+from tools.visual.corpus_audit_scoring import (
+    _apply_known_audit_outcome,
+    _apply_structure_penalty_policy,
+    _finalize_score,
+    _has_group_filter_bitmap_fallback,
+    _known_audit_outcome_for_svg,
+    _known_outcome_suppresses_priority,
+    _set_error_category,
+    score_audit_result,
+)
 
 logger = logging.getLogger("corpus_audit")
 
@@ -43,6 +58,36 @@ DEFAULT_INPUTS = (
     Path("tests/svg"),
 )
 _SKIP_DIR_NAMES = {"__pycache__", "baselines", "output"}
+_KNOWN_STALE_W3C_PNG_REFERENCES = {
+    "filters-conv-05-f": (
+        "bundled PNG footer shows $Revision: 1.1 $ while the local SVG source "
+        "is $Revision: 1.2 $"
+    ),
+    "filters-overview-03-b": (
+        "bundled PNG footer shows $Revision: 1.1 $ while the local SVG source "
+        "is $Revision: 1.2 $"
+    ),
+    "text-intro-02-b": (
+        "bundled PNG footer shows $Revision: 1.2 $ while the local SVG source "
+        "is $Revision: 1.10 $"
+    ),
+    "text-intro-09-b": (
+        "bundled PNG footer shows $Revision: 1.3 $ while the local SVG source "
+        "is $Revision: 1.7 $"
+    ),
+    "text-tspan-02-b": (
+        "bundled PNG footer shows $Revision: 1.10 $ while the local SVG source "
+        "is $Revision: 1.11 $"
+    ),
+    "text-text-07-t": (
+        "bundled PNG footer shows $Revision: 1.4 $ while the local SVG source "
+        "is $Revision: 1.6 $"
+    ),
+    "text-text-09-t": (
+        "bundled PNG footer shows $Revision: 1.5 $ while the local SVG source "
+        "is $Revision: 1.7 $"
+    ),
+}
 
 
 @dataclass
@@ -77,8 +122,12 @@ class AuditResult:
     resvg_metrics: dict[str, int] = field(default_factory=dict)
     fallback_asset_counts: dict[str, int] = field(default_factory=dict)
     fallback_reason_counts: dict[str, int] = field(default_factory=dict)
+    structure_penalty_suppressed: bool = False
+    triage_outcome: str | None = None
+    triage_reason: str | None = None
     notes: list[str] = field(default_factory=list)
     errors: dict[str, str] = field(default_factory=dict)
+    raw_score: float | None = None
     score: float = 0.0
 
 
@@ -245,7 +294,7 @@ def audit_svg(
         result.errors["read"] = str(exc)
         result.notes.append("Unable to read SVG source.")
         _set_error_category(result)
-        result.score = score_audit_result(result)
+        _finalize_score(result)
         return result
 
     pptx_path = artifact_dir / "presentation.pptx"
@@ -312,6 +361,9 @@ def audit_svg(
                     )
 
     browser_image: Path | None = None
+    stale_w3c_reference_reason = _stale_w3c_reference_reason(svg_path)
+    if stale_w3c_reference_reason:
+        result.notes.append(f"W3C PNG reference skipped: {stale_w3c_reference_reason}.")
     w3c_reference = _w3c_reference_png_for_svg(svg_path)
     if w3c_reference is not None:
         browser_dir = artifact_dir / "browser"
@@ -392,196 +444,10 @@ def audit_svg(
         )
 
     _set_error_category(result)
-    result.score = score_audit_result(result)
+    _apply_structure_penalty_policy(result)
+    _apply_known_audit_outcome(result, svg_path)
+    _finalize_score(result)
     return result
-
-
-def _run_animation_audit(
-    result: AuditResult,
-    *,
-    svg_text: str,
-    svg_path: Path,
-    pptx_path: Path,
-    artifact_dir: Path,
-    renderer: object | None,
-    browser_renderer: object,
-    browser_available: bool,
-    differ: VisualDiffer,
-    duration: float,
-    fps: float,
-) -> None:
-    capture_animation = getattr(renderer, "capture_animation", None)
-    if renderer is None or not callable(capture_animation):
-        result.animation_status = "unavailable"
-        result.notes.append("Animation audit requires a renderer with live capture.")
-        return
-    if not browser_available:
-        result.animation_status = "unavailable"
-        result.notes.append("Animation audit requires a browser renderer.")
-        return
-
-    render_frames: list[Path] | None = None
-    browser_frames: list[Path] | None = None
-
-    try:
-        render_frames = list(
-            capture_animation(
-                pptx_path,
-                artifact_dir / "render_animation",
-                duration=duration,
-                fps=fps,
-            )
-        )
-        browser_frames = list(
-            browser_renderer.capture_animation(
-                svg_text,
-                artifact_dir / "browser_animation",
-                duration=duration,
-                fps=fps,
-                source_path=svg_path,
-            )
-        )
-    except (
-        BrowserRenderError,
-        VisualRendererError,
-        OSError,
-        RuntimeError,
-        ValueError,
-    ) as exc:
-        result.animation_status = "error"
-        result.errors["animation"] = str(exc)
-        result.notes.append("Animation capture failed.")
-        return
-
-    frame_count = min(len(render_frames), len(browser_frames))
-    result.animation_frame_count = frame_count
-    if frame_count <= 0:
-        result.animation_status = "error"
-        result.errors["animation"] = "Animation capture produced no comparable frames."
-        result.notes.append("Animation capture produced no comparable frames.")
-        return
-    if len(render_frames) != len(browser_frames):
-        result.notes.append(
-            "Animation frame counts differ between PowerPoint and browser capture."
-        )
-
-    ssim_scores: list[float] = []
-    pixel_diffs: list[float] = []
-    worst_comparison = None
-    worst_index = -1
-
-    for index in range(frame_count):
-        comparison = differ.compare(
-            Image.open(browser_frames[index]),
-            Image.open(render_frames[index]),
-            generate_diff=True,
-        )
-        ssim_scores.append(comparison.ssim_score)
-        pixel_diffs.append(comparison.pixel_diff_percentage)
-        if (
-            worst_comparison is None
-            or comparison.ssim_score < worst_comparison.ssim_score
-        ):
-            worst_comparison = comparison
-            worst_index = index
-
-    result.animation_avg_ssim = sum(ssim_scores) / len(ssim_scores)
-    result.animation_min_ssim = min(ssim_scores)
-    result.animation_max_pixel_diff_percentage = max(pixel_diffs)
-    result.animation_status = (
-        "ok" if all(score >= differ.threshold for score in ssim_scores) else "mismatch"
-    )
-    if result.animation_status == "mismatch":
-        result.notes.append("Animation parity mismatch.")
-
-    if worst_comparison is not None and worst_comparison.diff_image is not None:
-        diff_dir = artifact_dir / "animation_diff"
-        diff_dir.mkdir(exist_ok=True)
-        worst_comparison.save_diff(diff_dir / f"frame_{worst_index:04d}.png")
-
-
-def _svg_has_animation(svg_text: str) -> bool:
-    try:
-        parser = ET.XMLParser(recover=True)
-        root = ET.fromstring(svg_text.encode("utf-8"), parser)
-    except ET.XMLSyntaxError:
-        return False
-    animation_tags = {
-        "animate",
-        "animateMotion",
-        "animateTransform",
-        "animateColor",
-        "set",
-    }
-    for element in root.iter():
-        tag = element.tag
-        if isinstance(tag, str) and tag.split("}")[-1] in animation_tags:
-            return True
-    return False
-
-
-def _apply_animation_trace_metrics(
-    result: AuditResult,
-    trace_report: dict[str, object] | None,
-) -> None:
-    if not isinstance(trace_report, dict):
-        return
-    stage_events = trace_report.get("stage_events")
-    if not isinstance(stage_events, list):
-        return
-
-    emitted = 0
-    skipped = 0
-    reason_counts: dict[str, int] = {}
-
-    def _bump(reason: str | None) -> None:
-        if not reason:
-            return
-        reason_counts[reason] = reason_counts.get(reason, 0) + 1
-
-    for event in stage_events:
-        if not isinstance(event, dict):
-            continue
-        if event.get("stage") != "animation":
-            continue
-        action = event.get("action")
-        metadata = event.get("metadata")
-        metadata_dict = metadata if isinstance(metadata, dict) else {}
-        if action == "fragment_emitted":
-            emitted += 1
-            continue
-        if action == "fragment_skipped":
-            skipped += 1
-            _bump(
-                str(metadata_dict.get("reason"))
-                if metadata_dict.get("reason")
-                else None
-            )
-            continue
-        if action == "parse_fallback":
-            reason = metadata_dict.get("reason")
-            count = metadata_dict.get("count")
-            try:
-                count_value = int(count)
-            except (TypeError, ValueError):
-                count_value = 1
-            if reason:
-                reason_counts[str(reason)] = (
-                    reason_counts.get(str(reason), 0) + count_value
-                )
-            continue
-        if action in {"timing_skipped", "unmapped_begin_trigger_target"}:
-            _bump(action)
-            reason = metadata_dict.get("reason")
-            if reason:
-                _bump(str(reason))
-
-    if emitted or skipped or reason_counts:
-        result.animation_emitted_count = emitted
-        result.animation_skipped_count = skipped
-        result.animation_reason_counts = dict(
-            sorted(reason_counts.items(), key=lambda pair: (-pair[1], pair[0]))
-        )
 
 
 def _apply_trace_metrics(
@@ -670,52 +536,6 @@ def _sort_counter(counter: Mapping[str, int]) -> dict[str, int]:
     return dict(sorted(counter.items(), key=lambda pair: (-pair[1], pair[0])))
 
 
-def _set_error_category(result: AuditResult) -> None:
-    if result.error_category is None and result.errors:
-        result.error_category = next(iter(result.errors))
-
-
-def score_audit_result(result: AuditResult) -> float:
-    """Compute a priority score for a result, higher means more urgent."""
-    score = 0.0
-    if result.build_status == "error":
-        score += 1000.0
-    if result.render_status == "error":
-        score += 250.0
-    elif result.render_status == "unavailable":
-        score += 25.0
-    if result.browser_status == "error":
-        score += 120.0
-    elif result.browser_status == "unavailable":
-        score += 10.0
-    if result.diff_status == "error":
-        score += 80.0
-    elif result.diff_status == "mismatch":
-        score += 40.0
-    if result.animation_status == "error":
-        score += 180.0
-    elif result.animation_status == "unavailable":
-        score += 20.0
-    elif result.animation_status == "mismatch":
-        score += 90.0
-
-    if result.ssim_score is not None:
-        score += max(0.0, (1.0 - result.ssim_score) * 200.0)
-    if result.pixel_diff_percentage is not None:
-        score += result.pixel_diff_percentage
-    if result.rasterized_count is not None:
-        score += result.rasterized_count * 8.0
-    if result.max_bbox_delta is not None:
-        score += result.max_bbox_delta * 2.0
-    if result.count_delta is not None:
-        score += abs(result.count_delta) * 20.0
-    if result.animation_min_ssim is not None:
-        score += max(0.0, (1.0 - result.animation_min_ssim) * 250.0)
-    if result.animation_max_pixel_diff_percentage is not None:
-        score += result.animation_max_pixel_diff_percentage * 0.5
-    return round(score, 3)
-
-
 def _classify_corpus(svg_path: Path) -> str:
     parts = svg_path.as_posix().split("/")
     if "resvg-test-suite" in parts:
@@ -741,10 +561,24 @@ def _w3c_reference_png_for_svg(svg_path: Path) -> Path | None:
         return None
     if svg_path.parent.name != "svg":
         return None
+    if _stale_w3c_reference_reason(svg_path):
+        return None
     candidate = svg_path.parent.parent / "png" / f"{svg_path.stem}.png"
     if candidate.is_file():
         return candidate
     return None
+
+
+def _stale_w3c_reference_reason(svg_path: Path) -> str | None:
+    """Return why a W3C PNG oracle should not be used for this SVG."""
+
+    svg_path = Path(svg_path)
+    if svg_path.suffix.lower() != ".svg" or svg_path.parent.name != "svg":
+        return None
+    candidate = svg_path.parent.parent / "png" / f"{svg_path.stem}.png"
+    if not candidate.is_file():
+        return None
+    return _KNOWN_STALE_W3C_PNG_REFERENCES.get(svg_path.stem)
 
 
 def _contains_path(parts: Sequence[str], needle: Sequence[str]) -> bool:
@@ -1009,6 +843,7 @@ __all__ = [
     "discover_svg_paths",
     "render_markdown_summary",
     "score_audit_result",
+    "_known_audit_outcome_for_svg",
     "write_audit_report",
 ]
 

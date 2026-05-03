@@ -158,7 +158,7 @@ class _DummyConverter(ShapeConversionMixin, PolicyHooksMixin):
         self._css_context = None
         self._resvg_tree = None
 
-    def _resolve_clip_ref(self, _element):  # pragma: no cover - simple stub
+    def _resolve_clip_ref(self, _element, *, use_transform=None):  # pragma: no cover - simple stub
         return None
 
     def _resolve_mask_ref(self, _element):  # pragma: no cover - simple stub

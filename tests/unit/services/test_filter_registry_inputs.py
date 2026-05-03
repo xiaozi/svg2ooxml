@@ -87,13 +87,19 @@ def test_seed_base_inputs_derives_paint_inputs_from_source_graphic() -> None:
 
     registry._seed_base_inputs(pipeline, context)
 
-    assert pipeline["FillPaint"].metadata["paint_source"] == "FillPaint"
-    assert pipeline["FillPaint"].metadata["stroke"] is None
-    assert pipeline["StrokePaint"].metadata["paint_source"] == "StrokePaint"
-    assert pipeline["StrokePaint"].metadata["fill"] is None
+    fill_meta = pipeline["FillPaint"].metadata
+    stroke_meta = pipeline["StrokePaint"].metadata
+    assert fill_meta["paint_source"] == "FillPaint"
+    assert fill_meta["paint_surface"] is True
+    assert fill_meta["fill"]["rgb"] == "FF0000"
+    assert fill_meta["stroke"] is None
+    assert stroke_meta["paint_source"] == "StrokePaint"
+    assert stroke_meta["paint_surface"] is True
+    assert stroke_meta["fill"]["rgb"] == "0000FF"
+    assert stroke_meta["stroke"] is None
 
 
-def test_seed_base_inputs_derives_group_paint_inputs_recursively() -> None:
+def test_seed_base_inputs_flattens_group_paint_inputs_into_surface() -> None:
     registry = FilterRegistry()
     filter_element = etree.Element("filter")
     child_descriptor = {
@@ -123,9 +129,13 @@ def test_seed_base_inputs_derives_group_paint_inputs_recursively() -> None:
 
     registry._seed_base_inputs(pipeline, context)
 
-    fill_child = pipeline["FillPaint"].metadata["children"][0]
-    stroke_child = pipeline["StrokePaint"].metadata["children"][0]
-    assert fill_child["fill"]["type"] == "solid"
-    assert fill_child["stroke"] is None
-    assert stroke_child["fill"] is None
-    assert stroke_child["stroke"]["paint"]["rgb"] == "0000FF"
+    fill_meta = pipeline["FillPaint"].metadata
+    stroke_meta = pipeline["StrokePaint"].metadata
+    assert fill_meta["paint_source"] == "FillPaint"
+    assert fill_meta["paint_surface"] is True
+    assert fill_meta["fill"]["rgb"] == "FF0000"
+    assert fill_meta["stroke"] is None
+    assert stroke_meta["paint_source"] == "StrokePaint"
+    assert stroke_meta["paint_surface"] is True
+    assert stroke_meta["fill"]["rgb"] == "0000FF"
+    assert stroke_meta["stroke"] is None
