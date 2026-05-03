@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
-import io
 import logging
 
 logger = logging.getLogger(__name__)
 
 try:  # pragma: no cover - optional dependency
     from google.oauth2.credentials import Credentials
-    from googleapiclient.discovery import build
-    from googleapiclient.http import MediaIoBaseUpload
+
+    from svg2ooxml.gsuite import (
+        PPTX_MIME,
+        SLIDES_MIME,
+        GSuiteClient,
+        GSuiteError,
+    )
 
     _GOOGLE_AVAILABLE = True
 except ImportError:  # pragma: no cover
@@ -31,23 +35,17 @@ def upload_to_google_slides(
         raise RuntimeError("Google API client libraries are not installed.")
 
     creds = Credentials(token=access_token)
-    drive = build("drive", "v3", credentials=creds, cache_discovery=True)
+    client = GSuiteClient(creds)
 
-    file_metadata = {
-        "name": title,
-        "mimeType": "application/vnd.google-apps.presentation",
-    }
-    media = MediaIoBaseUpload(
-        io.BytesIO(pptx_bytes),
-        mimetype="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-    )
-
-    file = (
-        drive.files()
-        .create(body=file_metadata, media_body=media, fields="id")
-        .execute()
-    )
-    file_id = file["id"]
+    try:
+        file_id = client.upload(
+            pptx_bytes,
+            mime_type=PPTX_MIME,
+            target_mime=SLIDES_MIME,
+            name=title,
+        )
+    except GSuiteError as exc:
+        raise RuntimeError(f"Google Slides upload failed: {exc}") from exc
 
     logger.info("Uploaded presentation %s as Google Slides (%s)", title, file_id)
     return f"https://docs.google.com/presentation/d/{file_id}/edit"

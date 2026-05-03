@@ -49,7 +49,6 @@ def test_figma2gslides_extra_declares_tool_runtime_dependencies() -> None:
         "cryptography",
         "google-cloud-firestore",
         "google-cloud-storage",
-        "google-api-python-client",
         "google-auth",
         "google-auth-oauthlib",
     } <= normalized

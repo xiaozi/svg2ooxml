@@ -4,8 +4,6 @@ from importlib import import_module as _im
 from typing import Any as _Any
 
 __all__ = [
-    'DriveError',
-    'GoogleDriveService',
     'GoogleOAuthService',
     'OAuthError',
     'TokenInfo',
@@ -13,14 +11,13 @@ __all__ = [
     'get_api_token_store',
     'get_cli_token_store',
     'get_system_username',
-    'drive_service',
     'oauth_service',
     'token_store'
 ]
 
 # map symbol -> relative module
-_symbol_map = {'DriveError': 'drive_service', 'GoogleDriveService': 'drive_service', 'OAuthError': 'oauth_service', 'GoogleOAuthService': 'oauth_service', 'get_api_token_store': 'token_store', 'TokenStore': 'token_store', 'TokenInfo': 'token_store', 'get_system_username': 'token_store', 'get_cli_token_store': 'token_store'}
-_module_map = {'drive_service': 'drive_service', 'oauth_service': 'oauth_service', 'token_store': 'token_store'}
+_symbol_map = {'OAuthError': 'oauth_service', 'GoogleOAuthService': 'oauth_service', 'get_api_token_store': 'token_store', 'TokenStore': 'token_store', 'TokenInfo': 'token_store', 'get_system_username': 'token_store', 'get_cli_token_store': 'token_store'}
+_module_map = {'oauth_service': 'oauth_service', 'token_store': 'token_store'}
 
 
 def __getattr__(name: str) -> _Any:  # PEP 562
