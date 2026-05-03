@@ -41,6 +41,7 @@ def apply_filter(
         images,
         plan,
         bounds=bounds,
+        viewport=viewport,
         width_px=surface.width,
         height_px=surface.height,
     )
@@ -198,6 +199,7 @@ def _seed_declared_input_surfaces(
     plan: FilterPlan,
     *,
     bounds: tuple[float, float, float, float],
+    viewport: Any,
     width_px: int,
     height_px: int,
 ) -> None:
@@ -208,10 +210,14 @@ def _seed_declared_input_surfaces(
     except Exception:  # pragma: no cover - optional raster support
         return
 
-    bounds_payload = _bounds_payload(bounds)
     for name, descriptor in plan.input_descriptors.items():
         if name in images:
             continue
+        bounds_payload = (
+            _viewport_bounds_payload(viewport)
+            if descriptor.get("paint_surface")
+            else _bounds_payload(bounds)
+        )
         try:
             input_surface = render_surface_from_descriptor(
                 descriptor=descriptor,
@@ -246,6 +252,17 @@ def _bounds_payload(bounds: tuple[float, float, float, float]) -> dict[str, floa
         "y": y0,
         "width": max(0.0, x1 - x0),
         "height": max(0.0, y1 - y0),
+    }
+
+
+def _viewport_bounds_payload(viewport: Any) -> dict[str, float]:
+    width = float(viewport.width) / float(viewport.scale_x or 1.0)
+    height = float(viewport.height) / float(viewport.scale_y or 1.0)
+    return {
+        "x": float(viewport.min_x),
+        "y": float(viewport.min_y),
+        "width": max(0.0, width),
+        "height": max(0.0, height),
     }
 
 

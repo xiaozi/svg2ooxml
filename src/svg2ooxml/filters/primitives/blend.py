@@ -70,7 +70,8 @@ class BlendFilter(Filter):
 
         if params.mode == "normal":
             drawingml, fallback, warnings = self._combine_normal(
-                base_result, top_result
+                base_result,
+                top_result,
             )
             metadata["native_support"] = bool(drawingml)
             if fallback:
@@ -94,7 +95,13 @@ class BlendFilter(Filter):
             )
 
         if params.mode in {"multiply", "screen", "darken", "lighten"}:
-            overlay_info = self._extract_overlay_color(top_result)
+            base_result, overlay_result = self._select_non_normal_inputs(
+                base_name,
+                base_result,
+                top_name,
+                top_result,
+            )
+            overlay_info = self._extract_overlay_color(overlay_result)
             if (
                 overlay_info
                 and overlay_info.approximation
@@ -194,22 +201,38 @@ class BlendFilter(Filter):
         base: FilterResult | None,
         top: FilterResult | None,
     ) -> tuple[str, str | None, tuple[str, ...]]:
-        fragments: list[str] = []
-        fallback: str | None = None
+        # feBlend normal follows the first input's paint in SVG's blended result
+        # model; keep this deterministic and avoid over-combining effect layers.
+        fragment = (base.drawingml or "").strip() if base is not None else ""
+        if not fragment:
+            fragment = (top.drawingml or "").strip() if top is not None else ""
         warnings = self._collect_warnings(base, top)
-        for result in (base, top):
-            if result is None:
-                continue
-            fragment = (result.drawingml or "").strip()
-            if fragment:
-                fragments.append(fragment)
-            fallback = self._merge_one_fallback(fallback, result.fallback)
-        if not fragments:
-            return "", fallback, warnings
-        merged = merge_effect_fragments(*fragments)
-        if merged:
-            return merged, fallback, warnings
-        return "".join(fragments), fallback, warnings
+        fallback = self._merge_fallback(base, top)
+        if fragment:
+            return fragment, fallback, warnings
+        return "", fallback, warnings
+
+    def _select_non_normal_inputs(
+        self,
+        first_name: str,
+        first_result: FilterResult | None,
+        second_name: str,
+        second_result: FilterResult | None,
+    ) -> tuple[FilterResult | None, FilterResult | None]:
+        first_is_source = first_name == "SourceGraphic"
+        second_is_source = second_name == "SourceGraphic"
+
+        if first_is_source ^ second_is_source:
+            # Use SourceGraphic as the base for non-normal blend modes. This keeps
+            # fillOverlay anchored to the source fill and places the non-source
+            # color input into the overlay channel.
+            if first_is_source:
+                return first_result, second_result
+            return second_result, first_result
+
+        # No explicit SourceGraphic swap signal; preserve input order for
+        # compatibility.
+        return first_result, second_result
 
     def _build_overlay(
         self,

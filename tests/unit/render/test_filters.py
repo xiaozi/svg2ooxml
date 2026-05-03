@@ -159,7 +159,89 @@ def test_plan_filter_derives_fill_paint_input_from_source_graphic() -> None:
     )
 
     assert plan is not None
+    assert plan.input_descriptors["FillPaint"]["paint_surface"] is True
     assert plan.input_descriptors["FillPaint"]["stroke"] is None
+
+
+def test_apply_filter_derives_stroke_paint_as_full_surface() -> None:
+    pytest.importorskip("skia")
+
+    blur = FilterPrimitive(
+        tag="feGaussianBlur",
+        attributes={"in": "StrokePaint", "stdDeviation": "0"},
+        styles={},
+    )
+    filter_node = _make_filter_node([blur])
+    plan = plan_filter(
+        filter_node,
+        options={
+            "filter_inputs": {
+                "SourceGraphic": _rect_descriptor(
+                    fill=None,
+                    stroke={
+                        "width": 2.0,
+                        "paint": {"type": "solid", "rgb": "0000FF", "opacity": 1.0},
+                        "join": "miter",
+                        "cap": "butt",
+                        "miter_limit": 4.0,
+                        "dash_array": None,
+                        "dash_offset": 0.0,
+                        "opacity": 1.0,
+                    },
+                )
+            }
+        },
+    )
+    assert plan is not None
+
+    surface = Surface.make(10, 10)
+    viewport = Viewport(
+        width=10, height=10, min_x=0.0, min_y=0.0, scale_x=1.0, scale_y=1.0
+    )
+
+    result = apply_filter(surface, plan, (0.0, 0.0, 10.0, 10.0), viewport)
+
+    center = result.data[5, 5]
+    assert center[2] > 0.8
+    assert center[0] < 0.05
+    assert center[1] < 0.05
+    assert center[3] > 0.8
+
+
+def test_plan_filter_keeps_object_bbox_gradient_paint_geometry_bound() -> None:
+    blur = FilterPrimitive(
+        tag="feGaussianBlur",
+        attributes={"in": "StrokePaint", "stdDeviation": "0"},
+        styles={},
+    )
+    filter_node = _make_filter_node([blur])
+    gradient = _linear_gradient_descriptor()
+    assert gradient["gradient_units"] == "objectBoundingBox"
+
+    plan = plan_filter(
+        filter_node,
+        options={
+            "filter_inputs": {
+                "SourceGraphic": _rect_descriptor(
+                    fill=None,
+                    stroke={
+                        "width": 2.0,
+                        "paint": gradient,
+                        "join": "miter",
+                        "cap": "butt",
+                        "miter_limit": 4.0,
+                        "dash_array": None,
+                        "dash_offset": 0.0,
+                        "opacity": 1.0,
+                    },
+                )
+            }
+        },
+    )
+
+    assert plan is not None
+    assert "paint_surface" not in plan.input_descriptors["StrokePaint"]
+    assert plan.input_descriptors["StrokePaint"]["fill"] is None
 
 
 def test_plan_filter_rejects_undeclared_fill_paint_input() -> None:

@@ -11,7 +11,7 @@ def _context_with_pipeline(pipeline: dict[str, FilterResult]) -> FilterContext:
     return FilterContext(filter_element=filter_element, pipeline_state=pipeline)
 
 
-def test_blend_normal_merges_effect_lists() -> None:
+def test_blend_normal_prefers_first_input() -> None:
     pipeline = {
         "SourceGraphic": FilterResult(success=True, drawingml="<a:effectLst><a:fill/></a:effectLst>", metadata={}),
         "flood1": FilterResult(success=True, drawingml="<a:effectLst><a:solidFill/></a:effectLst>", metadata={}),
@@ -21,7 +21,22 @@ def test_blend_normal_merges_effect_lists() -> None:
 
     result = BlendFilter().apply(primitive, context)
 
-    assert result.drawingml == "<a:effectLst><a:fill/><a:solidFill/></a:effectLst>"
+    assert result.drawingml == "<a:effectLst><a:fill/></a:effectLst>"
+    assert result.fallback is None
+    assert result.metadata.get("native_support") is True
+
+
+def test_blend_normal_prefers_first_input_even_when_sourcegraphic_is_second() -> None:
+    pipeline = {
+        "SourceGraphic": FilterResult(success=True, drawingml="<a:effectLst><a:fill/></a:effectLst>", metadata={}),
+        "red": FilterResult(success=True, drawingml="<a:effectLst><a:solidFill/></a:effectLst>", metadata={}),
+    }
+    context = _context_with_pipeline(pipeline)
+    primitive = etree.fromstring('<feBlend mode="normal" in="red" in2="SourceGraphic"/>')
+
+    result = BlendFilter().apply(primitive, context)
+
+    assert result.drawingml == "<a:effectLst><a:solidFill/></a:effectLst>"
     assert result.fallback is None
     assert result.metadata.get("native_support") is True
 
@@ -49,6 +64,29 @@ def test_blend_multiply_uses_fill_overlay_when_flood_metadata() -> None:
     assert result.drawingml == expected_overlay
     assert result.fallback is None
     assert result.metadata.get("native_support") is True
+
+
+def test_blend_multiply_uses_flood_overlay_even_when_in_is_source() -> None:
+    pipeline = {
+        "SourceGraphic": FilterResult(success=True, drawingml="<a:effectLst><a:fill/></a:effectLst>", metadata={}),
+        "red": FilterResult(
+            success=True,
+            drawingml="",
+            metadata={"flood_color": "00FF00", "flood_opacity": "calc(25% + 25%)"},
+        ),
+    }
+    context = _context_with_pipeline(pipeline)
+    primitive = etree.fromstring('<feBlend mode="multiply" in="red" in2="SourceGraphic"/>')
+
+    result = BlendFilter().apply(primitive, context)
+
+    expected_overlay = (
+        "<a:effectLst><a:fill/>"
+        '<a:fillOverlay blend="mult">'
+        '<a:solidFill><a:srgbClr val="00FF00"><a:alpha val="50000"/></a:srgbClr></a:solidFill>'
+        "</a:fillOverlay></a:effectLst>"
+    )
+    assert result.drawingml == expected_overlay
 
 
 def test_blend_multiply_approximates_gradient_overlay() -> None:

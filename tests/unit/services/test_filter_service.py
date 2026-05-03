@@ -515,7 +515,9 @@ def test_raster_adapter_safe_size_caps_huge_dimensions() -> None:
     ) == (64, 64)
 
 
-def test_raster_adapter_resource_roots_prefer_explicit_asset_root(tmp_path: Path) -> None:
+def test_raster_adapter_resource_roots_prefer_explicit_asset_root(
+    tmp_path: Path,
+) -> None:
     svg_dir = tmp_path / "svg"
     svg_dir.mkdir()
     image_service = ImageService()
@@ -825,7 +827,9 @@ def test_raster_adapter_infers_filter_region_from_filter_element() -> None:
     assert bounds.get("height") == pytest.approx(162.0)
 
 
-def test_raster_adapter_uses_filter_region_for_background_surface_without_descriptor() -> None:
+def test_raster_adapter_uses_filter_region_for_background_surface_without_descriptor() -> (
+    None
+):
     pytest.importorskip("skia")
 
     adapter = RasterAdapter()
@@ -882,6 +886,64 @@ def test_raster_adapter_uses_filter_region_for_background_surface_without_descri
     assert alpha_bbox[0] < 20
     assert 45 < alpha_bbox[1] < 65
     assert alpha_bbox[2] < 80
+
+
+def test_raster_adapter_background_input_uses_resolved_filter_bounds_once() -> None:
+    pytest.importorskip("skia")
+
+    adapter = RasterAdapter()
+    svg = etree.fromstring("""
+        <svg xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <filter id="bg" filterUnits="objectBoundingBox"
+                    x="-30%" y="-30%" width="160%" height="160%">
+              <feFlood flood-color="white" result="flood"/>
+              <feGaussianBlur in="BackgroundAlpha" stdDeviation="0" result="blur"/>
+              <feMerge>
+                <feMergeNode in="flood"/>
+                <feMergeNode in="blur"/>
+              </feMerge>
+            </filter>
+          </defs>
+          <g enable-background="new">
+            <rect x="20" y="20" width="10" height="60" fill="green"/>
+            <g id="target" filter="url(#bg)">
+              <circle cx="40" cy="50" r="20" fill="red"/>
+            </g>
+          </g>
+        </svg>
+        """)
+    ns = {"svg": "http://www.w3.org/2000/svg"}
+    filter_element = svg.xpath(".//svg:filter[@id='bg']", namespaces=ns)[0]
+    target = svg.xpath(".//svg:g[@id='target']", namespaces=ns)[0]
+    context = FilterContext(
+        filter_element=filter_element,
+        options={
+            "element": target,
+            "ir_bbox": {"x": 20.0, "y": 30.0, "width": 40.0, "height": 40.0},
+        },
+    )
+
+    result = adapter.render_filter(
+        filter_id="bg",
+        filter_element=filter_element,
+        context=context,
+        default_size=(40, 40),
+    )
+
+    image = Image.open(BytesIO(result.image_bytes)).convert("RGBA")
+    composited = Image.alpha_composite(
+        Image.new("RGBA", image.size, (255, 255, 255, 255)),
+        image,
+    ).convert("RGB")
+
+    assert result.metadata["bounds"] == {
+        "x": 8.0,
+        "y": 18.0,
+        "width": 64.0,
+        "height": 64.0,
+    }
+    assert any(channel_min < 250 for channel_min, _ in composited.getextrema())
 
 
 def test_raster_adapter_object_bounding_box_numeric_region_scales_by_bbox() -> None:
