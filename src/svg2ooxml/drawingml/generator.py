@@ -71,12 +71,16 @@ class DrawingMLPathGenerator:
         # Add path list with path
         pathLst = a_sub(custGeom, "pathLst")
         # stroke defaults to true, fill defaults to "norm" in OOXML —
-        # only emit non-default values to avoid triggering PowerPoint repair
+        # only emit non-default values to avoid triggering PowerPoint repair.
+        # Note: we deliberately do NOT emit `stroke="0"`. PowerPoint accepts
+        # it as redundant when the shape's <a:ln><a:noFill/></a:ln> already
+        # suppresses the outline, but Google Slides' import returns HTTP 500
+        # on the path-level attribute. The shape-level <a:ln> is the
+        # canonical way to express "no outline" and works across PowerPoint,
+        # LibreOffice, and Google Slides.
         path_attrs: dict[str, str] = {"w": width_emu, "h": height_emu}
         if fill_mode != "norm":
             path_attrs["fill"] = fill_mode
-        if stroke_mode in ("false", "0", "none"):
-            path_attrs["stroke"] = "0"
         path = a_sub(pathLst, "path", **path_attrs)
 
         # Add all path commands
