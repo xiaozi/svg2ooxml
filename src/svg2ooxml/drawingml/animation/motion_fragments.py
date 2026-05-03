@@ -39,6 +39,7 @@ class _MotionFragmentRecord:
     r_ang: str | None
     pts_types: str | None
     r_ctr: tuple[str, str] | None
+    non_motion_signature: tuple[tuple[str, str], ...]
     outer_signature: tuple[Any, ...]
     behavior_signature: tuple[Any, ...]
 
@@ -150,6 +151,7 @@ def _extract_simple_motion_fragment(
         r_ang=motion.get("rAng"),
         pts_types=motion.get("ptsTypes"),
         r_ctr=r_ctr,
+        non_motion_signature=_non_motion_children_signature(child_tn_list, motion),
         outer_signature=_timing_signature(
             outer_ctn,
             ignore_attrs={
@@ -182,6 +184,11 @@ def _motion_records_compatible(
         return False
     if not _optional_values_compatible(left.r_ctr, right.r_ctr):
         return False
+    if not _non_motion_children_compatible(
+        left.non_motion_signature,
+        right.non_motion_signature,
+    ):
+        return False
     return True
 
 
@@ -209,17 +216,18 @@ def _merge_motion_group(records: list[_MotionFragmentRecord]) -> None:
 
 
 def _choose_motion_anchor(records: list[_MotionFragmentRecord]) -> _MotionFragmentRecord:
+    def _non_motion_signature_weight(signature: tuple[tuple[str, str], ...]) -> int:
+        return len(signature)
+
     def score(record: _MotionFragmentRecord) -> tuple[int, int, int]:
-        non_motion_children = sum(
-            1 for child in record.child_tn_list if child.tag != _ANIM_MOTION_TAG
-        )
+        non_motion_children = _non_motion_signature_weight(record.non_motion_signature)
         return (
             non_motion_children,
             -len(record.attr_names),
             -(1 if record.behavior.get("rctx") else 0),
         )
 
-    return min(records, key=score)
+    return max(records, key=score)
 
 
 def _sync_attr_name_list(c_bhvr: etree._Element, attr_names: list[str]) -> None:
@@ -258,6 +266,34 @@ def _sync_r_ctr(
         existing = p_sub(motion, "rCtr")
     existing.set("x", r_ctr[0])
     existing.set("y", r_ctr[1])
+
+
+def _non_motion_children_signature(
+    child_tn_list: etree._Element,
+    motion: etree._Element,
+) -> tuple[tuple[str, str], ...]:
+    non_motion: list[tuple[str, str]] = []
+    for child in child_tn_list:
+        if child is motion:
+            continue
+        local_name = etree.QName(child).localname
+        namespace = etree.QName(child).namespace or ""
+        non_motion.append((namespace, local_name))
+    return tuple(non_motion)
+
+
+def _non_motion_children_compatible(
+    left: tuple[tuple[str, str], ...],
+    right: tuple[tuple[str, str], ...],
+) -> bool:
+    if left == right:
+        return True
+
+    scale_signature = ((NS_P, "animScale"),)
+    return (
+        (left == () and right == scale_signature)
+        or (right == () and left == scale_signature)
+    )
 
 
 def _read_r_ctr(motion: etree._Element) -> tuple[str, str] | None:

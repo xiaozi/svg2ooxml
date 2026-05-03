@@ -63,12 +63,12 @@ class AnimationPipeline:
         if not isinstance(metadata, dict):
             return
         for element_id in _iter_string_items(metadata.get("element_ids")):
-            self._shape_map.setdefault(element_id, str(shape_id))
+            self._shape_map[element_id] = str(shape_id)
         self._register_navigation_trigger(metadata, shape_id)
 
     def register_element_ids(self, element_ids: Iterable[object], shape_id: int) -> None:
         for element_id in _iter_string_items(element_ids):
-            self._shape_map.setdefault(element_id, str(shape_id))
+            self._shape_map[element_id] = str(shape_id)
 
     def metadata_targets_animation(self, metadata: dict[str, object] | None) -> bool:
         if not isinstance(metadata, dict) or not self._animation_element_ids:

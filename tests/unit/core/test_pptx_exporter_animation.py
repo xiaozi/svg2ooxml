@@ -121,6 +121,18 @@ def _timing_shape_ids_inside_groups(slide_xml: str) -> set[str]:
     return timing_shape_ids & grouped_shape_ids
 
 
+def _timing_shape_ids_by_animation_type(slide_xml: str, tag: str) -> set[str]:
+    root = ET.fromstring(slide_xml.encode("utf-8"))
+    return {
+        sp_tgt.get("spid")
+        for sp_tgt in root.xpath(
+            f".//p:timing//p:{tag}//p:spTgt",
+            namespaces=_NS,
+        )
+        if sp_tgt.get("spid")
+    }
+
+
 def _timing_group_ids(slide_xml: str) -> set[str]:
     root = ET.fromstring(slide_xml.encode("utf-8"))
     timing_shape_ids = {
@@ -1453,6 +1465,67 @@ def test_group_translate_rotate_with_animated_child_lowers_translate_and_drops_r
         and animation.transform_type == TransformType.ROTATE
         for animation in scene.animations
         if animation.element_id == "child"
+    )
+
+
+def test_bee_group_lowering_drops_parent_rotate_and_splits_translate() -> None:
+    svg = Path("assets/bee-flying-svg.svg").read_text(encoding="utf-8")
+
+    render_result, scene, tracer = _render(svg)
+
+    assert scene.animations is not None
+    assert "<p:grpSp>" not in render_result.slide_xml
+    assert not any(
+        animation.element_id == "bee_group"
+        and animation.animation_type == AnimationType.ANIMATE_TRANSFORM
+        for animation in scene.animations
+    )
+    group_split_translates = [
+        animation
+        for animation in scene.animations
+        if animation.raw_attributes.get("svg2ooxml_group_transform_split")
+        == "bee_group"
+    ]
+    split_translate_ids = {
+        animation.element_id
+        for animation in group_split_translates
+        if animation.transform_type == TransformType.TRANSLATE
+    }
+    split_rotate_ids = {
+        animation.element_id
+        for animation in group_split_translates
+        if animation.transform_type == TransformType.ROTATE
+    }
+    assert split_rotate_ids == set()
+    assert split_translate_ids == {
+        f"path{i}" for i in range(12, 31)
+    }
+    important_mappings = {"path20", "path23", "path27", "path28"}
+    mapped_animation = [
+        event
+        for event in tracer.report().stage_events
+        if event.stage == "animation" and event.action == "mapped_animation"
+    ]
+    source_to_shape = {
+        event.metadata.get("element_id"): event.metadata.get("shape_id")
+        for event in mapped_animation
+        if isinstance(event.metadata.get("element_id"), str)
+        and isinstance(event.metadata.get("shape_id"), str)
+    }
+    assert important_mappings.issubset(source_to_shape.keys())
+    mapped_shape_ids = {source_to_shape[source] for source in important_mappings}
+    assert mapped_shape_ids <= _timing_shape_ids_by_animation_type(
+        render_result.slide_xml, "animRot"
+    ) | _timing_shape_ids_by_animation_type(render_result.slide_xml, "animClr") | _timing_shape_ids_inside_groups(
+        render_result.slide_xml
+    )
+    # Wing flutter should be emitted as rotation animation for dedicated segments.
+    assert {source_to_shape["path27"], source_to_shape["path28"]} <= _timing_shape_ids_by_animation_type(
+        render_result.slide_xml, "animRot"
+    )
+    # Color shifts for abdomen/stinger need per-shape fill timing entries.
+    assert {source_to_shape["path20"], source_to_shape["path23"]} <= _timing_shape_ids_by_animation_type(
+        render_result.slide_xml, "animClr"
     )
 
 
