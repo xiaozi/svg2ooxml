@@ -355,11 +355,17 @@ def _group_contains_filter_fallback(group: Group) -> bool:
 
 
 def _group_requires_clip_raster(group: Group) -> bool:
+    # Presence of skia_path or path_segments alone is not a reliable
+    # rasterization signal: 938e8a7 began populating both on every
+    # ClipRef, which made this check fire for trivial primitive clips
+    # that the leaf-flatten + native clip path can render losslessly.
+    # Force raster only when the clip explicitly cannot be expressed
+    # natively (strategy == EMF) or has been marked degenerate.
     clip = getattr(group, "clip", None)
-    return bool(
-        clip is not None
-        and (
-            getattr(clip, "skia_path", None) is not None
-            or getattr(clip, "path_segments", None)
-        )
-    )
+    if clip is None:
+        return False
+    strategy = getattr(clip, "strategy", None)
+    strategy_value = getattr(strategy, "value", strategy)
+    if strategy_value == "emf":
+        return True
+    return bool(getattr(clip, "is_empty", False))
