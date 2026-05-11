@@ -7,8 +7,20 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from svg2ooxml.ir.animation import AnimationDefinition, BeginTriggerType
+from svg2ooxml.ir.scene import IRElement
 
 from .animation import DrawingMLAnimationWriter
+from .animation.flipbook import (
+    DEFAULT_FRAME_COUNT,
+    FlipbookConfigError,
+    FlipbookPipeline,
+    FlipbookRenderer,
+    assert_flipbook_renderer_present,
+)
+
+_FLIPBOOK_MIN_FRAMES = 2
+_FLIPBOOK_MAX_FRAMES = 64
+from .animation.policy import AnimationPolicy
 
 if TYPE_CHECKING:  # pragma: no cover - type checking only
     from svg2ooxml.core.tracing import ConversionTracer
@@ -40,6 +52,7 @@ class AnimationPipeline:
         self._animation_element_ids: set[str] = set()
         self._policy: dict[str, object] = {}
         self._tracer: ConversionTracer | None = None
+        self._flipbook_pipeline: FlipbookPipeline | None = None
 
     def reset(self, payload: dict[str, Any] | None, *, tracer: ConversionTracer | None = None) -> None:
         self._payload = payload
@@ -49,6 +62,7 @@ class AnimationPipeline:
         self._animation_element_ids = set()
         self._policy = {}
         self._tracer = tracer
+        self._flipbook_pipeline = None
         if isinstance(payload, dict):
             payload_policy = payload.get("policy")
             if isinstance(payload_policy, dict):
@@ -58,6 +72,40 @@ class AnimationPipeline:
                 element_id = getattr(definition, "element_id", None)
                 if isinstance(element_id, str):
                     self._animation_element_ids.add(element_id)
+            self._configure_flipbook(payload)
+
+    def _configure_flipbook(self, payload: dict[str, Any]) -> None:
+        renderer = payload.get("flipbook_renderer")
+        assert_flipbook_renderer_present(self._policy, renderer)
+        if renderer is None:
+            return
+        raw_n_frames = payload.get("flipbook_n_frames", DEFAULT_FRAME_COUNT)
+        try:
+            n_frames = int(raw_n_frames)
+        except (TypeError, ValueError):
+            n_frames = DEFAULT_FRAME_COUNT
+        if not _FLIPBOOK_MIN_FRAMES <= n_frames <= _FLIPBOOK_MAX_FRAMES:
+            raise FlipbookConfigError(
+                f"flipbook_n_frames must be between {_FLIPBOOK_MIN_FRAMES} and "
+                f"{_FLIPBOOK_MAX_FRAMES} inclusive, got {raw_n_frames!r}."
+            )
+        self._flipbook_pipeline = FlipbookPipeline(
+            renderer, AnimationPolicy(self._policy), n_frames=n_frames
+        )
+
+    def run_flipbook_prepass(self, scene: list[IRElement]) -> None:
+        """Splice flipbook frames into ``scene`` before the IR walk.
+
+        Safe to call unconditionally — no-op when no FlipbookRenderer was
+        provided in the payload. Must be invoked after :meth:`reset` and
+        before the writer renders the scene, so the regular IR walk
+        registers the frame element_ids → shape_ids alongside everything
+        else.
+        """
+        if self._flipbook_pipeline is None or not isinstance(self._payload, dict):
+            return
+        definitions = self._payload.get("definitions") or []
+        self._flipbook_pipeline.process(scene, list(definitions))
 
     def register_mapping(self, metadata: dict[str, object] | None, shape_id: int) -> None:
         if not isinstance(metadata, dict):
@@ -109,6 +157,8 @@ class AnimationPipeline:
         timeline = self._payload.get("timeline") or []
         if not definitions:
             return ""
+
+        self._populate_flipbook_shape_map(definitions)
 
         self._animation_target_map = {}
         for definition in definitions:
@@ -164,6 +214,7 @@ class AnimationPipeline:
         # Build complete timing XML, including bldLst
         # Start timing IDs after the last shape ID to avoid collisions
         start_id = max(max_shape_id + 1, 1)
+        flipbook_frame_shape_ids = self._resolve_flipbook_frame_shape_ids(remapped)
         animation_xml = self._writer.build(
             remapped,
             timeline,
@@ -171,6 +222,7 @@ class AnimationPipeline:
             options=self._policy,
             animated_shape_ids=sorted(list(animated_shape_ids), key=int),
             start_id=start_id,
+            flipbook_frame_shape_ids=flipbook_frame_shape_ids or None,
         )
         if animation_xml:
             self._trace(
@@ -191,6 +243,72 @@ class AnimationPipeline:
                 },
             )
         return animation_xml
+
+    def _populate_flipbook_shape_map(
+        self, definitions: list[AnimationDefinition]
+    ) -> None:
+        """Map each flipbook animation's original element_id to its first
+        frame's shape_id so the standard remapping loop treats the
+        animation as targeting a real slide shape rather than dropping it
+        as unmapped.
+        """
+        if self._flipbook_pipeline is None:
+            return
+        for definition in definitions:
+            svg_element_id = getattr(definition, "element_id", None)
+            if not isinstance(svg_element_id, str):
+                continue
+            if svg_element_id in self._shape_map:
+                continue
+            flip_key = (
+                getattr(definition, "animation_id", None) or svg_element_id
+            )
+            frame_element_ids = self._flipbook_pipeline.frame_element_ids(flip_key)
+            if not frame_element_ids:
+                continue
+            first_shape_id = self._shape_map.get(frame_element_ids[0])
+            if first_shape_id is not None:
+                self._shape_map[svg_element_id] = first_shape_id
+
+    def _resolve_flipbook_frame_shape_ids(
+        self, remapped_definitions: list[AnimationDefinition]
+    ) -> dict[str, list[str]]:
+        """Build the animation_id → list[frame_shape_id] map the writer
+        consumes to call ``instantiate_flipbook``.
+
+        The key matches what ``_build_flipbook_fragment`` looks up:
+        ``animation.animation_id`` if present, otherwise the post-remap
+        ``animation.element_id`` (which is the first frame's shape_id by
+        the time ``_populate_flipbook_shape_map`` has run).
+        """
+        if self._flipbook_pipeline is None or not isinstance(self._payload, dict):
+            return {}
+        result: dict[str, list[str]] = {}
+        originals = self._payload.get("definitions") or []
+        for original in originals:
+            svg_element_id = getattr(original, "element_id", None)
+            anim_id = getattr(original, "animation_id", None)
+            flip_key = anim_id or svg_element_id
+            if not isinstance(flip_key, str):
+                continue
+            frame_element_ids = self._flipbook_pipeline.frame_element_ids(flip_key)
+            if not frame_element_ids:
+                continue
+            shape_ids = [
+                self._shape_map[fe]
+                for fe in frame_element_ids
+                if fe in self._shape_map
+            ]
+            if not shape_ids:
+                continue
+            if isinstance(anim_id, str):
+                writer_key = anim_id
+            else:
+                writer_key = self._shape_map.get(svg_element_id or "")
+                if not writer_key:
+                    continue
+            result[writer_key] = shape_ids
+        return result
 
     def _remap_trigger_targets(
         self,

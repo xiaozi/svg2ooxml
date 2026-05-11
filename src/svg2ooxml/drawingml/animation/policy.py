@@ -14,6 +14,7 @@ mapping; unsupported cases are explicitly skipped with policy reasons.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from svg2ooxml.common.interpolation import BezierEasing
@@ -21,7 +22,25 @@ from svg2ooxml.common.interpolation import BezierEasing
 if TYPE_CHECKING:
     from svg2ooxml.ir.animation import AnimationDefinition
 
-__all__ = ["AnimationPolicy"]
+__all__ = ["AnimationAction", "AnimationPolicy"]
+
+
+class AnimationAction(Enum):
+    """How the writer should handle a single animation definition."""
+
+    EMIT = "emit"
+    SKIP = "skip"
+    FLIPBOOK = "flipbook"
+
+
+# Policy reasons that route to flipbook when ``fallback_mode="flipbook"``.
+# Other skip reasons (unsupported triggers, spline error overruns, etc.)
+# stay as SKIP regardless of mode.
+_FLIPBOOK_ELIGIBLE_REASONS: frozenset[str] = frozenset(
+    {
+        "dead_path_stroke_weight",
+    }
+)
 
 
 class AnimationPolicy:
@@ -57,24 +76,38 @@ class AnimationPolicy:
         animation: AnimationDefinition,
         max_error: float,
     ) -> tuple[bool, str | None]:
-        """Determine if animation should be skipped.
+        """Determine if animation should be skipped by native emission.
 
-        Args:
-            animation: Animation definition to evaluate
-            max_error: Maximum spline approximation error (0.0 if no splines)
+        Both SKIP and FLIPBOOK actions return True here — neither emits a
+        native handler. FLIPBOOK callers must additionally consult
+        :meth:`decide_action` to route into the flipbook pipeline.
+        """
+        action, reason = self.decide_action(animation, max_error)
+        return (action != AnimationAction.EMIT, reason)
 
-        Returns:
-            (should_skip, reason) tuple where:
-            - should_skip: True if animation should be skipped
-            - reason: Skip reason string or None
+    def decide_action(
+        self,
+        animation: AnimationDefinition,
+        max_error: float,
+    ) -> tuple[AnimationAction, str | None]:
+        """Decide how the writer should handle this animation.
 
-        Example:
-            >>> policy = AnimationPolicy({})
-            >>> should_skip, reason = policy.should_skip(animation, 0.0)
+        Returns an (action, reason) pair where reason is either the policy
+        reason for non-EMIT actions or None for EMIT. Dead-path animations
+        return FLIPBOOK only when ``fallback_mode="flipbook"`` is configured;
+        otherwise they return SKIP and the legacy drop behavior applies.
         """
         skip_reason = self._policy_skip_reason(animation, max_error)
-        should_skip = skip_reason is not None
-        return (should_skip, skip_reason)
+        if skip_reason is None:
+            return (AnimationAction.EMIT, None)
+
+        if (
+            skip_reason in _FLIPBOOK_ELIGIBLE_REASONS
+            and self._fallback_mode() == "flipbook"
+        ):
+            return (AnimationAction.FLIPBOOK, skip_reason)
+
+        return (AnimationAction.SKIP, skip_reason)
 
     def should_suppress_timing(self) -> bool:
         """Determine if timing XML generation should be suppressed.
@@ -88,12 +121,16 @@ class AnimationPolicy:
         Returns:
             True if timing should be suppressed, False otherwise
         """
-        # Check fallback mode
-        fallback_mode = str(self._options.get("fallback_mode", "native")).lower()
-        if fallback_mode != "native":
+        # Native and flipbook modes both emit timing XML (flipbook routes
+        # dead-path animations through instantiate_flipbook). Other modes
+        # ("raster", explicit disables) suppress timing globally.
+        if self._fallback_mode() not in ("native", "flipbook"):
             return True
 
         return False
+
+    def _fallback_mode(self) -> str:
+        return str(self._options.get("fallback_mode", "native")).lower()
 
     def estimate_spline_error(
         self,
@@ -131,8 +168,10 @@ class AnimationPolicy:
         Returns:
             Skip reason string or None if should not skip
         """
-        fallback_mode = str(self._options.get("fallback_mode", "native")).lower()
-        if fallback_mode != "native":
+        # Flipbook mode is a recognized fallback; do not blanket-skip. Dead
+        # paths still get specific reasons returned below so decide_action()
+        # can route them to FLIPBOOK rather than SKIP.
+        if self._fallback_mode() not in ("native", "flipbook"):
             return "fallback_mode_not_native"
 
         raw_animation_type = getattr(animation, "animation_type", None)

@@ -39,7 +39,8 @@ from .motion_fragments import (
     renumber_generated_timing_ids,
 )
 from .native_fragment import NativeFragment
-from .policy import AnimationPolicy
+from .oracle import default_oracle
+from .policy import AnimationAction, AnimationPolicy
 from .tav_builder import TAVBuilder
 from .value_processors import ValueProcessor
 from .xml_builders import AnimationXMLBuilder
@@ -62,6 +63,7 @@ class DrawingMLAnimationWriter:
         self._tav_builder = TAVBuilder(self._xml_builder)
         self._id_allocator = TimingIDAllocator()
         self._policy: AnimationPolicy | None = None
+        self._flipbook_frame_shape_ids: dict[str, list[str]] = {}
 
         # Handlers in priority order (most specific first, catch-all last)
         self._handlers: list[AnimationHandler] = [
@@ -100,10 +102,18 @@ class DrawingMLAnimationWriter:
         options: Mapping[str, Any] | None = None,
         animated_shape_ids: list[str] | None = None,
         start_id: int = 1,
+        flipbook_frame_shape_ids: Mapping[str, list[str]] | None = None,
     ) -> str:
-        """Build PowerPoint timing XML for a sequence of animations."""
+        """Build PowerPoint timing XML for a sequence of animations.
+
+        ``flipbook_frame_shape_ids`` maps animation_id → list of resolved
+        shape_ids for each pre-spliced flipbook frame. The caller must
+        already have run :class:`FlipbookPipeline` against the IR scene
+        and mapped frame element_ids through the writer's shape registry.
+        """
         options = dict(options or {})
         self._policy = AnimationPolicy(options)
+        self._flipbook_frame_shape_ids = dict(flipbook_frame_shape_ids or {})
 
         # Pre-allocate IDs for the complete timing tree, starting after shape IDs
         ids = self._id_allocator.allocate(n_animations=len(animations), start_id=start_id)
@@ -216,7 +226,37 @@ class DrawingMLAnimationWriter:
             animation_elements=animation_elements,
             animated_shape_ids=animated_shape_ids or [],
         )
+        self._inject_flipbook_bld_entries(timing_tree, native_fragments)
         return to_string(timing_tree)
+
+    @staticmethod
+    def _inject_flipbook_bld_entries(
+        timing_tree: etree._Element,
+        native_fragments: list[NativeFragment],
+    ) -> None:
+        """Add ``<p:bldP>`` entries for flipbook frame shapes into ``<p:bldLst>``.
+
+        Each flipbook frame shape needs a build-list entry whose ``grpId``
+        matches the par_id of the animation's ``<p:cTn>``; otherwise PPT
+        silently ignores the visibility ``<p:set>`` calls inside the par.
+        Native bldLst assembly does not know about these extra shapes, so we
+        append them after the timing tree has been built.
+        """
+        from svg2ooxml.drawingml.xml_builder import NS_P, p_sub
+
+        extra_entries: list[tuple[str, int]] = []
+        for fragment in native_fragments:
+            entries = fragment.metadata.get("flipbook_bld_entries") if fragment.metadata else None
+            if entries:
+                extra_entries.extend(entries)
+        if not extra_entries:
+            return
+
+        bld_lst = timing_tree.find(f".//{{{NS_P}}}bldLst")
+        if bld_lst is None:
+            bld_lst = p_sub(timing_tree, "bldLst")
+        for shape_id, grp_id in extra_entries:
+            p_sub(bld_lst, "bldP", spid=str(shape_id), grpId=str(grp_id), animBg="1")
 
     def _build_animation(
         self,
@@ -233,9 +273,11 @@ class DrawingMLAnimationWriter:
         animation = self._clamp_duration(animation)
 
         max_error = self._policy.estimate_spline_error(animation)
-        should_skip, skip_reason = self._policy.should_skip(animation, max_error)
-        if should_skip:
-            return None, {"reason": skip_reason}
+        action, action_reason = self._policy.decide_action(animation, max_error)
+        if action == AnimationAction.SKIP:
+            return None, {"reason": action_reason}
+        if action == AnimationAction.FLIPBOOK:
+            return self._build_flipbook_fragment(animation, par_id, action_reason)
 
         handler = self._find_handler(animation)
         if handler is None:
@@ -256,6 +298,51 @@ class DrawingMLAnimationWriter:
             return fragment, None
         except Exception as e:
             return None, {"reason": f"handler_error: {str(e)}"}
+
+    def _build_flipbook_fragment(
+        self,
+        animation: AnimationDefinition,
+        par_id: int,
+        policy_reason: str | None,
+    ) -> tuple[NativeFragment | None, dict[str, Any] | None]:
+        """Assemble a flipbook ``<p:par>`` for a dead-path animation.
+
+        Requires that :class:`FlipbookPipeline` has already pre-spliced
+        frame elements into the IR and that the writer was given a
+        ``flipbook_frame_shape_ids`` map resolving animation_id to the
+        list of frame shape IDs allocated during the IR walk.
+        """
+        anim_key = animation.animation_id or animation.element_id
+        frame_shape_ids = self._flipbook_frame_shape_ids.get(anim_key)
+        if not frame_shape_ids or len(frame_shape_ids) < 2:
+            return None, {
+                "reason": "flipbook_frames_unavailable",
+                "policy_reason": policy_reason,
+                "animation_id": anim_key,
+            }
+
+        oracle = default_oracle()
+        try:
+            par, bld_entries = oracle.instantiate_flipbook(
+                frame_shape_ids=list(frame_shape_ids),
+                par_id=par_id,
+                duration_ms=animation.duration_ms,
+                delay_ms=animation.begin_ms,
+            )
+        except Exception as exc:
+            return None, {"reason": f"flipbook_oracle_error: {exc}"}
+
+        fragment = NativeFragment(
+            par=par,
+            source="flipbook",
+            strategy="oracle-flipbook",
+            metadata={
+                "flipbook_bld_entries": bld_entries,
+                "policy_reason": policy_reason,
+                "animation_id": anim_key,
+            },
+        )
+        return fragment, None
 
     @staticmethod
     def _coerce_native_fragment(

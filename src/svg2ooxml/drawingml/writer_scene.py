@@ -45,6 +45,7 @@ class DrawingMLSceneMixin:
         )
         self._mask_pipeline.reset(assets=self._assets, tracer=self._tracer)
         self._animation_pipeline.reset(animation_payload, tracer=self._tracer)
+        self._animation_pipeline.run_flipbook_prepass(scene)
         self._text_renderer = DrawingMLTextRenderer(
             text_template=self._text_template,
             wordart_template=self._wordart_template,
