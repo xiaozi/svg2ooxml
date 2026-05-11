@@ -1024,21 +1024,57 @@ structures.
 
 ---
 
-## Infrastructure (archived)
+## Infrastructure
+
+### EU-Sovereign Self-Hosted Stack (ADR-038)
+
+Replaces the retired GCP deployment (ADR-014/015/016, project deleted
+2026-01-16). All hosting and SaaS dependencies must be EU-jurisdiction to
+satisfy a data-sovereignty / CLOUD Act avoidance policy.
+
+**Stack:**
+- **Compute**: Hetzner Cloud (DE/FI), running Coolify as the PaaS layer.
+  svg2ooxml ships as a Dockerized HTTP API; lxml works unchanged in-container.
+- **Source & CI**: Forgejo self-hosted on a Hetzner box. Forgejo Actions builds
+  the image; webhook into Coolify triggers redeploy. Data volume backed up via
+  restic to a second Hetzner box / Storage Box.
+- **CDN / edge**: Gcore (LU). Terminates TLS at edge, origin-pulls to Coolify
+  with origin shielding enabled. Cache policy: no-cache on `POST /convert`;
+  content-addressed GETs are cacheable.
+- **Certs**: ZeroSSL (AT) via ACME, replacing Let's Encrypt (ISRG/US). Edge cert
+  managed in Gcore; origin can use a pinned long-lived cert or skip origin
+  verification entirely.
+- **Origin lockdown**: Hetzner firewall allowlists Gcore origin-pull IP ranges;
+  Coolify's Traefik additionally requires an `X-Origin-Auth` shared-secret
+  header injected by Gcore, preventing direct-to-origin bypass.
+
+**Rejected alternatives** (all US-jurisdiction): Fly.io, Cloud Run, Vercel, AWS,
+Cloudflare, GitHub-as-source, Let's Encrypt.
+
+**Tradeoffs:**
+- Self-hosting trades managed-service convenience for jurisdiction control: we
+  own patching, backups, and the single-VPS failure mode. Mitigated by
+  snapshots, restic backups, and the option of a second Hetzner box for warm
+  failover when traffic justifies it.
+- No global edge from origin — Gcore's PoPs handle that.
+- Prior Cloud Run bill (~$30/mo, paying for warm min-instances) replaced by
+  ~€5/mo Hetzner compute + Gcore (volume-quoted) + ZeroSSL (free tier).
+
+### Archived: prior GCP deployment
 
 > The GCP project `powerful-layout-467812-p1` was deleted 2026-01-16.
 > All Cloud Run, Firebase, and related CI/CD are non-functional.
-> These decisions are preserved for reference if the service is rebuilt.
+> These decisions are preserved for reference; superseded by ADR-038.
 
-### Figma Export on Cloud Run (ADR-014)
+#### Figma Export on Cloud Run (ADR-014)
 Cloud Run with Cloud Build triggers, Cloud Storage staging, Firestore job
 tracking, Google Drive/Slides API integration. Scalable serverless endpoint
 for Figma plugin.
 
-### Queue, Throttling, Cache (ADR-015)
+#### Queue, Throttling, Cache (ADR-015)
 Huey task queue with Redis backend. Per-IP rate limiting via slowapi.
 Font cache in Cloud Storage. Content-addressed conversion cache.
 
-### gcloud Client Setup (ADR-016)
+#### gcloud Client Setup (ADR-016)
 Local gcloud CLI configuration: auth, project/region, Cloud Run/Build
 components, environment variables.
