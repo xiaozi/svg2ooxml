@@ -86,6 +86,8 @@ class PatternPaint:
     tile_image: bytes | None = None
     tile_width_px: int | None = None
     tile_height_px: int | None = None
+    # "tile" (default, repeat at intrinsic size) or "stretch" (fill shape).
+    tile_fit_mode: str = "tile"
     # Populated by shape_renderer after media registration
     tile_relationship_id: str | None = None
 

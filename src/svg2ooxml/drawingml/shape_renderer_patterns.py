@@ -62,13 +62,25 @@ class ShapeRendererPatternMixin:
                 origin=Point(0.0, 0.0),
                 size=Rect(0.0, 0.0, 1.0, 1.0),
                 data=image_data,
-                format="png",
+                format=_sniff_image_format(image_data),
                 metadata={"image_source": "pattern_tile"},
             )
             return self._register_media(image)
         except Exception:
             self._logger.debug("Failed to register pattern tile image", exc_info=True)
             return None
+
+
+def _sniff_image_format(data: bytes) -> str:
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "png"
+    if data[:3] == b"\xff\xd8\xff":
+        return "jpeg"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "webp"
+    return "png"
 
 
 __all__ = ["ShapeRendererPatternMixin"]

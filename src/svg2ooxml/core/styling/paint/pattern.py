@@ -26,6 +26,7 @@ from svg2ooxml.elements.patterns._helpers import (
     pattern_opacity,
     style_map,
 )
+from svg2ooxml.elements.patterns.tile_renderer import build_image_tile_payload
 from svg2ooxml.ir.paint import PatternPaint, SolidPaint
 from svg2ooxml.policy.constants import FALLBACK_EMF
 from svg2ooxml.services import ConversionServices
@@ -74,9 +75,17 @@ def build_pattern_paint(
     tile_image = None
     tile_width_px = None
     tile_height_px = None
+    tile_fit_mode = "tile"
     phase_x, phase_y = _tile_phase(pattern_descriptor, element)
+
+    image_payload = build_image_tile_payload(pattern_element)
+    if image_payload is not None:
+        tile_image, tile_width_px, tile_height_px = image_payload
+        tile_fit_mode = "stretch"
+        preset = None
+
     processor = get_pattern_processor(services)
-    if processor is not None:
+    if processor is not None and tile_image is None:
         try:
             analysis = processor.analyze_pattern_element(pattern_element, context)
             preset = analysis.preset_candidate
@@ -123,6 +132,7 @@ def build_pattern_paint(
         tile_image=tile_image,
         tile_width_px=tile_width_px,
         tile_height_px=tile_height_px,
+        tile_fit_mode=tile_fit_mode,
     )
 
 

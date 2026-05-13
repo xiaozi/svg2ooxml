@@ -11,6 +11,11 @@ def merge_pattern_paint(
     runtime_paint: PatternPaint,
     analyzed_paint: PatternPaint,
 ) -> PatternPaint:
+    tile_image = analyzed_paint.tile_image or runtime_paint.tile_image
+    if analyzed_paint.tile_image:
+        tile_fit_mode = analyzed_paint.tile_fit_mode
+    else:
+        tile_fit_mode = runtime_paint.tile_fit_mode
     return replace(
         runtime_paint,
         preset=analyzed_paint.preset or runtime_paint.preset,
@@ -21,9 +26,10 @@ def merge_pattern_paint(
         or runtime_paint.foreground_theme_color,
         background_theme_color=analyzed_paint.background_theme_color
         or runtime_paint.background_theme_color,
-        tile_image=analyzed_paint.tile_image or runtime_paint.tile_image,
+        tile_image=tile_image,
         tile_width_px=analyzed_paint.tile_width_px or runtime_paint.tile_width_px,
         tile_height_px=analyzed_paint.tile_height_px or runtime_paint.tile_height_px,
+        tile_fit_mode=tile_fit_mode,
     )
 
 

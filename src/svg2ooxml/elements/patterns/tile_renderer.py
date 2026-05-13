@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import math
 from collections.abc import Iterator
 
@@ -37,6 +38,75 @@ TileEllipse = tuple[float, float, float, float, tuple[int, int, int], float]
 TileRect = tuple[float, float, float, float, tuple[int, int, int], float]
 
 
+def build_image_tile_payload(
+    element: ET.Element,
+) -> tuple[bytes, int, int] | None:
+    """Extract a single embedded image from a pattern as its tile payload.
+
+    Returns raw image bytes (PNG/JPEG/...) and the image's intrinsic pixel size,
+    or None if the pattern is not a simple image wrapper.
+    """
+    image = _find_single_image_descendant(element)
+    if image is None:
+        return None
+    href = image.get("{http://www.w3.org/1999/xlink}href") or image.get("href")
+    if not href:
+        return None
+    payload = _decode_data_uri(href)
+    if payload is None:
+        return None
+    image_bytes = payload
+    width_attr = parse_float_attr(image, "width", axis="x", default=0.0) or 0.0
+    height_attr = parse_float_attr(image, "height", axis="y", default=0.0) or 0.0
+    width_px = max(int(round(width_attr)), 1)
+    height_px = max(int(round(height_attr)), 1)
+    return image_bytes, width_px, height_px
+
+
+def _find_single_image_descendant(element: ET.Element) -> ET.Element | None:
+    images: list[ET.Element] = []
+
+    def walk(node: ET.Element) -> bool:
+        for child in node:
+            if not isinstance(child.tag, str):
+                continue
+            tag = local_name(child.tag)
+            if tag in {"g", "a", "switch"}:
+                if not walk(child):
+                    return False
+                continue
+            if tag == "image":
+                images.append(child)
+                if len(images) > 1:
+                    return False
+                continue
+            # Any non-image visible content disqualifies the fast path.
+            return False
+        return True
+
+    if not walk(element):
+        return None
+    return images[0] if len(images) == 1 else None
+
+
+def _decode_data_uri(href: str) -> bytes | None:
+    token = href.strip()
+    if not token.lower().startswith("data:"):
+        return None
+    comma = token.find(",")
+    if comma == -1:
+        return None
+    header = token[5:comma]
+    payload = token[comma + 1 :]
+    is_base64 = ";base64" in header.lower()
+    if not is_base64:
+        return None
+    try:
+        return base64.b64decode(payload, validate=False)
+    except Exception:
+        return None
+
+
 def build_tile_payload(
     element: ET.Element,
     *,
@@ -44,6 +114,10 @@ def build_tile_payload(
     phase_x: float = 0.0,
     phase_y: float = 0.0,
 ) -> tuple[bytes, int, int] | None:
+    image_payload = build_image_tile_payload(element)
+    if image_payload is not None:
+        return image_payload
+
     tile_width = max(analysis.geometry.tile_width, 0.0)
     tile_height = max(analysis.geometry.tile_height, 0.0)
     width_px = max(int(math.ceil(tile_width)), 1)
@@ -484,6 +558,7 @@ def rasterize_rect(
 
 
 __all__ = [
+    "build_image_tile_payload",
     "build_tile_payload",
     "composite_rgba_pixel",
     "encode_rgba_png",

@@ -83,8 +83,12 @@ def _pattern_to_fill_elem(paint: PatternPaint, *, opacity: float | None = None):
         if tile_opacity is not None and tile_opacity < 0.999:
             alphaModFix = a_sub(blip, "alphaModFix")
             alphaModFix.set("amt", str(opacity_to_ppt(tile_opacity)))
-        tile_attrs = _tile_attrs_from_pattern_transform(paint.transform)
-        a_sub(blipFill, "tile", **tile_attrs)
+        if paint.tile_fit_mode == "stretch":
+            stretch = a_sub(blipFill, "stretch")
+            a_sub(stretch, "fillRect")
+        else:
+            tile_attrs = _tile_attrs_from_pattern_transform(paint.transform)
+            a_sub(blipFill, "tile", **tile_attrs)
         return blipFill
 
     preset = (paint.preset or "pct5").strip()
