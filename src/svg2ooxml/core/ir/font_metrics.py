@@ -13,6 +13,63 @@ from svg2ooxml.services.fonts.fontforge_utils import (
     open_font,
 )
 
+try:
+    from PIL import ImageFont as _PILImageFont
+except Exception:  # pragma: no cover - Pillow optional
+    _PILImageFont = None  # type: ignore[assignment]
+
+_PIL_FONT_CACHE: dict[tuple[str, int, int, str], object | None] = {}
+
+
+def _pil_load_font(family: str, weight: int, italic: bool, size_px: int):
+    if _PILImageFont is None:
+        return None
+    style = "italic" if italic else "normal"
+    key = (family, weight, size_px, style)
+    if key in _PIL_FONT_CACHE:
+        return _PIL_FONT_CACHE[key]
+
+    style_words: list[str] = []
+    if weight >= 700:
+        style_words.append("Bold")
+    elif weight <= 300:
+        style_words.append("Light")
+    if italic:
+        style_words.append("Italic")
+    suffix = " ".join(style_words)
+
+    candidates: list[str] = []
+    base_names = [family, family.replace(" ", "")]
+    seen: set[str] = set()
+    for base in base_names:
+        for variant in (
+            f"{base} {suffix}".strip(),
+            f"{base}-{suffix}".strip("-"),
+            base,
+        ):
+            if variant and variant not in seen:
+                seen.add(variant)
+                candidates.append(variant)
+
+    font = None
+    for name in candidates:
+        try:
+            font = _PILImageFont.truetype(name, size=size_px)
+            try:
+                actual = (font.getname() or ("", ""))[0]
+            except Exception:
+                actual = ""
+            if actual and family.lower().replace(" ", "") not in actual.lower().replace(" ", ""):
+                font = None
+                continue
+            break
+        except Exception:
+            font = None
+            continue
+
+    _PIL_FONT_CACHE[key] = font
+    return font
+
 if TYPE_CHECKING:  # pragma: no cover - type checking only
     from svg2ooxml.ir.text import Run
 
@@ -147,7 +204,42 @@ def estimate_run_width(text: str, run: Run, font_service: Any | None) -> float:
 
     metrics = resolve_font_metrics(font_service, run)
     if metrics is None:
-        return len(visible_text) * font_px * 0.6
+        # Try to measure with Pillow when the requested font is installed
+        # locally; this gives accurate per-string widths without requiring
+        # FontForge.
+        family = (run.font_family or "Arial").split(",")[0].strip().strip('"\'')
+        weight = 700 if run.bold else 400
+        pil_font = _pil_load_font(family, weight, run.italic, max(1, int(round(font_px))))
+        if pil_font is not None:
+            try:
+                bbox = pil_font.getbbox(visible_text.replace("\n", ""))
+                width_px = float(bbox[2] - bbox[0])
+                if width_px > 0:
+                    return width_px
+            except Exception:
+                pass
+
+        # Without per-glyph metrics, approximate per-character advance.
+        # CJK / fullwidth glyphs occupy ~1.0 em; Latin proportional fonts
+        # average roughly 0.5 em (most modern UI fonts: Inter, Roboto,
+        # Helvetica, San Francisco all sit in 0.48–0.55).
+        total = 0.0
+        for ch in visible_text:
+            if ch == "\n":
+                continue
+            width = unicodedata.east_asian_width(ch)
+            if width in ("W", "F"):
+                total += font_px
+            elif width == "A":
+                # Ambiguous (e.g. CJK punctuation in CJK context).
+                total += font_px * 0.85
+            elif ch.isupper() or ch.isdigit():
+                total += font_px * 0.6
+            elif ch == " ":
+                total += font_px * 0.28
+            else:
+                total += font_px * 0.5
+        return total
 
     width_units = 0.0
     for ch in visible_text:
